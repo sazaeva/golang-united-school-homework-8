@@ -2,11 +2,11 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"io/fs"
+	"io/ioutil"
 	"os"
 )
 
@@ -19,29 +19,29 @@ type Users struct {
 type Arguments map[string]string
 
 func parseArgs() Arguments {
-	var id = flag.String("id", "", "id flag")
-	var operation = flag.String("operation", "", "operation flag")
-	var item = flag.String("item", "", "item flag")
-	var filename = flag.String("filename", "", "filename flag")
+	var id = flag.String("id", "", "takes an id")
+	var operation = flag.String("operation", "", "takes operations (add, list, findById, remove)")
+	var item = flag.String("item", "", "takes user info")
+	var fileName = flag.String("fileName", "", "takes file name")
 	flag.Parse()
 
 	return Arguments{
 		"id":        *id,
 		"operation": *operation,
 		"item":      *item,
-		"filename":  *filename,
+		"fileName":  *fileName,
 	}
 }
 
 func Perform(args Arguments, writer io.Writer) error {
-	var operation func(Arguments) (string, error)
+	var operation func(Arguments, io.Writer) error
 
 	if args["operation"] == "" {
 		return fmt.Errorf("-operation flag has to be specified")
 	}
 
-	if args["filename"] == "" {
-		return fmt.Errorf("-filename flag has to be specified")
+	if args["fileName"] == "" {
+		return fmt.Errorf("-fileName flag has to be specified")
 	}
 
 	switch args["operation"] {
@@ -66,137 +66,159 @@ func Perform(args Arguments, writer io.Writer) error {
 		return fmt.Errorf("Operation %s not allowed!", args["operation"])
 	}
 
-	str, err := operation(args)
-	if err != nil {
-		return err
-	}
-
-	_, err = writer.Write([]byte(str))
+	err := operation(args, writer)
 	if err != nil {
 		return err
 	}
 	return nil
 }
 
-func add(args Arguments) (string, error) {
-	item := args["item"]
+func add(args Arguments, writer io.Writer) error {
+	item := []byte(args["item"])
+	filename := args["fileName"]
+	users := make([]Users, 0)
+	newUser := Users{}
 
-	file, err := os.OpenFile(args["filename"], os.O_RDWR|os.O_CREATE, os.ModeAppend)
-	defer func(file *os.File) {
-		err := file.Close()
+	err := json.Unmarshal(item, &newUser)
+	content, err := readFile(filename)
+	if err != nil {
+		return err
+	}
+
+	if len(content) > 0 {
+		err = json.Unmarshal(content, &users)
 		if err != nil {
-
+			return nil
 		}
-	}(file)
-
-	if err != nil {
-		return "", err
 	}
 
-	content, err := os.ReadFile(args["filename"])
-	if err != nil {
-		return "", err
+	for _, v := range users {
+		if v.Id == newUser.Id {
+			message := fmt.Sprintf("Item with id %s already exists", v.Id)
+			writer.Write([]byte(message))
+			return nil
+		}
 	}
 
-	_, err = file.WriteAt([]byte(item), int64(len(content)))
+	users = append(users, newUser)
+	data, err := json.Marshal(users)
 	if err != nil {
-		return "", err
+		return err
 	}
 
-	return "", nil
+	err = writeFile(filename, 0644, data)
+	if err != nil {
+		return err
+	}
+
+	return nil
 }
-func list(args Arguments) (string, error) {
-	filename := args["filename"]
 
-	if !checkFileExists(filename) {
-		fmt.Println("File does not exists")
-		return "", nil
-	}
+func list(args Arguments, writer io.Writer) error {
+	filename := args["fileName"]
 
 	content, err := readFile(filename)
 	if err != nil {
-		return "", err
+		return err
 	}
 
-	for _, val := range content {
-		fmt.Println(val)
-	}
+	writer.Write(content)
 
-	return "", nil
+	return nil
 }
-func remove(args Arguments) (string, error) {
-	//userId := args["id"]
-
-	return "", nil
-}
-
-func findById(args Arguments) (string, error) {
+func remove(args Arguments, writer io.Writer) error {
 	userId := args["id"]
-	filename := args["filename"]
+	users := make([]Users, 0)
+	filename := args["fileName"]
+
+	content, err := readFile(filename)
+	if err != nil {
+		return err
+	}
+
+	err = json.Unmarshal(content, &users)
+	if err != nil {
+		return err
+	}
+
+	inx := 0
+	exist := false
+	for i, u := range users {
+		if u.Id == userId {
+			exist = true
+			inx = i
+		}
+	}
+
+	if !exist {
+		message := fmt.Sprintf("Item with id %s not found", userId)
+		writer.Write([]byte(message))
+		return nil
+	}
+
+	users = append(users[:inx], users[inx+1:]...)
+	dataForFile, _ := json.Marshal(users)
+
+	err = writeFile(filename, 0644, dataForFile)
+	if err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func findById(args Arguments, writer io.Writer) error {
+	userId := args["id"]
+	filename := args["fileName"]
 
 	users := make([]Users, 0)
 
 	content, err := readFile(filename)
 	if err != nil {
-		return "", err
+		return err
 	}
 
 	err = json.Unmarshal(content, &users)
 	if err != nil {
 		fmt.Println(err)
-		return "", err
+		return err
 	}
 
 	for _, t := range users {
 		if t.Id == userId {
-			fmt.Printf("User found: %s", t.Email)
-			return t.Email, nil
+			message := fmt.Sprintf("{\"id\":\"%s\",\"email\":\"%s\",\"age\":%v}", t.Id, t.Email, t.Age)
+			writer.Write([]byte(message))
+			return nil
 		}
 	}
 
-	return "", err
+	return err
 }
 
 func readFile(filename string) ([]byte, error) {
-	if !checkFileExists(filename) {
-		fmt.Println("File does not exists")
-		return nil, errors.New("File does not exists")
-	}
-
-	content, err := os.ReadFile(filename)
+	file, err := os.OpenFile(filename, os.O_RDWR|os.O_CREATE, 0644)
+	defer file.Close()
 	if err != nil {
-		return content, err
+		return nil, err
+	}
+	data, err := ioutil.ReadAll(file)
+	if err != nil {
+		return nil, err
 	}
 
-	return content, nil
+	return data, nil
 }
 
-func checkFileExists(filename string) bool {
-	_, err := os.OpenFile(filename, os.O_RDONLY, os.ModeAppend)
-	if err != nil {
-		return false
-	}
-
-	return true
-}
-
-func writeFile(filename string, fileMode fs.FileMode, message []byte) bool {
+func writeFile(filename string, fileMode fs.FileMode, message []byte) error {
 	err := os.WriteFile(filename, message, fileMode)
 	if err != nil {
-		return false
+		return err
 	}
 
-	return true
+	return nil
 }
 
 func main() {
-	//existingItems := "[{\"id\":\"1\",\"email\":\"test@test.com\",\"age\":34},{\"id\":\"2\",\"email\":\"test2@test.com\",\"age\":32}]"
-	//if !checkFileExists(args["filename"]) {
-	//  createFile(args["filename"], filePermission, []byte(existingItems))
-	//} else {
-	//  writeFile(args["filename"], filePermission, []byte(existingItems))
-	//}
-
 	err := Perform(parseArgs(), os.Stdout)
 	if err != nil {
 		panic(err)
